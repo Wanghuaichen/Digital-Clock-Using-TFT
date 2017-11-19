@@ -1,0 +1,319 @@
+/**
+  ******************************************************************************
+  * File Name          : freertos.c
+  * Description        : Code for freertos applications
+  ******************************************************************************
+  * This notice applies to any and all portions of this file
+  * that are not between comment pairs USER CODE BEGIN and
+  * USER CODE END. Other portions of this file, whether 
+  * inserted by the user or by software development tools
+  * are owned by their respective copyright owners.
+  *
+  * Copyright (c) 2017 STMicroelectronics International N.V. 
+  * All rights reserved.
+  *
+  * Redistribution and use in source and binary forms, with or without 
+  * modification, are permitted, provided that the following conditions are met:
+  *
+  * 1. Redistribution of source code must retain the above copyright notice, 
+  *    this list of conditions and the following disclaimer.
+  * 2. Redistributions in binary form must reproduce the above copyright notice,
+  *    this list of conditions and the following disclaimer in the documentation
+  *    and/or other materials provided with the distribution.
+  * 3. Neither the name of STMicroelectronics nor the names of other 
+  *    contributors to this software may be used to endorse or promote products 
+  *    derived from this software without specific written permission.
+  * 4. This software, including modifications and/or derivative works of this 
+  *    software, must execute solely and exclusively on microcontroller or
+  *    microprocessor devices manufactured by or for STMicroelectronics.
+  * 5. Redistribution and use of this software other than as permitted under 
+  *    this license is void and will automatically terminate your rights under 
+  *    this license. 
+  *
+  * THIS SOFTWARE IS PROVIDED BY STMICROELECTRONICS AND CONTRIBUTORS "AS IS" 
+  * AND ANY EXPRESS, IMPLIED OR STATUTORY WARRANTIES, INCLUDING, BUT NOT 
+  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A 
+  * PARTICULAR PURPOSE AND NON-INFRINGEMENT OF THIRD PARTY INTELLECTUAL PROPERTY
+  * RIGHTS ARE DISCLAIMED TO THE FULLEST EXTENT PERMITTED BY LAW. IN NO EVENT 
+  * SHALL STMICROELECTRONICS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+  * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, 
+  * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF 
+  * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING 
+  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  *
+  ******************************************************************************
+  */
+
+/* Includes ------------------------------------------------------------------*/
+#include "FreeRTOS.h"
+#include "task.h"
+#include "cmsis_os.h"
+
+/* USER CODE BEGIN Includes */     
+
+#include 	"stdio.h"
+#include	"stdlib.h"
+
+/* TFT LCD 240x320 using 9341 driver chip */
+#include	"tft9341.h"
+
+/* Flash W25Q64 for 64kbit (8Mbytes) image data */
+#include	"w25qxx_flash.h"
+
+/* Temperature and Humidity Sensor HDC1080 */
+#include	"hdc1080.h"
+
+#include	"spi.h"
+
+#include	"i2c.h"
+/* USER CODE END Includes */
+
+/* Variables -----------------------------------------------------------------*/
+osThreadId mainTaskHandle;
+osThreadId slideTaskHandle;
+osSemaphoreId semaControlTFTHandle;
+
+/* USER CODE BEGIN Variables */
+extern uint16_t POINT_COLOR ;
+
+W25QXX_Handle_TypeDef flash_64kbits = { &hspi2, GPIOA, GPIO_PIN_15 };
+
+uint8_t time_value[7] = { 0 },time_value_temp[7] = { 0 };
+uint8_t string_buffer[20];
+
+float temperature;
+uint8_t humidity;
+
+/* USER CODE END Variables */
+
+/* Function prototypes -------------------------------------------------------*/
+void MainTaskFunction(void const * argument);
+void SlideTaskFunction(void const * argument);
+
+void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+
+/* USER CODE BEGIN FunctionPrototypes */
+
+
+/* Read image from flash then display it on TFTLCD
+ * image_id from 0 to 53 ( 54 Images )
+ */
+void Display_Image(uint8_t image_id);
+
+void Display_Template(void);
+/* USER CODE END FunctionPrototypes */
+
+/* Hook prototypes */
+
+/* Init FreeRTOS */
+
+void MX_FREERTOS_Init(void) {
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+	/* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* definition and creation of semaControlTFT */
+  osSemaphoreDef(semaControlTFT);
+  semaControlTFTHandle = osSemaphoreCreate(osSemaphore(semaControlTFT), 1);
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+	/* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+	/* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* Create the thread(s) */
+  /* definition and creation of mainTask */
+  osThreadDef(mainTask, MainTaskFunction, osPriorityRealtime, 0, 256);
+  mainTaskHandle = osThreadCreate(osThread(mainTask), NULL);
+
+  /* definition and creation of slideTask */
+  osThreadDef(slideTask, SlideTaskFunction, osPriorityNormal, 0, 256);
+  slideTaskHandle = osThreadCreate(osThread(slideTask), NULL);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+	/* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+	/* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+}
+
+/* MainTaskFunction function */
+void MainTaskFunction(void const * argument)
+{
+
+  /* USER CODE BEGIN MainTaskFunction */
+	UNUSED(argument);
+	uint8_t i;
+	static	uint8_t dot_flag = 1;
+
+	Display_Template();
+
+	/* Infinite loop */
+	while(1)
+	{
+
+		if(osSemaphoreWait(semaControlTFTHandle, osWaitForever) == osOK)
+		{
+			//Read time from RTC
+			HAL_I2C_Mem_Read(&hi2c1, DS3231_ADD<<1, 0x00, I2C_MEMADD_SIZE_8BIT, time_value_temp, 7, 1000);
+
+			//Check Time value and display time
+			for(i = 0 ; i < 7 ; i++)
+			{
+				if(time_value_temp[i] != time_value[i])
+				{
+					time_value[i] = time_value_temp[i];
+					switch(i)
+					{
+					case 0: //Seconds
+
+						if(dot_flag) //Blink dot (:)
+						{
+							dot_flag = 0;
+							POINT_COLOR = TIME_DISPLAY_COLOR;
+						}
+						else
+						{
+							dot_flag = 1;
+							POINT_COLOR = BACKGROUND_COLOR;
+						}
+						tft_putchar26x48(DOT_LOCAL_COLUMN,DOT_LOCAL_ROW,':',TFT_STRING_MODE_BACKGROUND);
+						POINT_COLOR = TIME_DISPLAY_COLOR;
+						break;
+					case 1: //Minus
+						sprintf( (char*)string_buffer,"%02x"  , (time_value[1]) );
+						tft_puts26x48(MINUS_LOCAL_ROW , MINUS_LOCAL_COLUMN , (int8_t*)string_buffer , TFT_STRING_MODE_BACKGROUND);
+						break;
+					case 2: //Hour
+						sprintf( (char*)string_buffer,"%02x" , (time_value[2]) );
+						tft_puts26x48(HOUR_LOCAL_ROW , HOUR_LOCAL_COLUMN , (int8_t*)string_buffer , TFT_STRING_MODE_BACKGROUND);
+						break;
+					case 4: //Date
+						break;
+					case 5: //Month
+						break;
+					}
+				}
+			}
+			//Enable display task
+			osSemaphoreRelease(semaControlTFTHandle);
+			osThreadSuspend(NULL);
+			osDelay(PERIOD_READ_TIME);
+		}
+	}
+  /* USER CODE END MainTaskFunction */
+}
+
+/* SlideTaskFunction function */
+void SlideTaskFunction(void const * argument)
+{
+  /* USER CODE BEGIN SlideTaskFunction */
+	UNUSED(argument);
+	static uint8_t slide_flag = 0;
+	/* Infinite loop */
+	while(1)
+	{
+		if(osSemaphoreWait(semaControlTFTHandle, osWaitForever) == osOK)
+		{
+			hdc1080_start_measurement(&hi2c1, &temperature, &humidity);
+			switch(slide_flag)
+			{
+			case 0://Display temperature
+				sprintf((char*)string_buffer,"%5.2f C",temperature);
+				tft_puts14x24(MONTH_LOCAL_ROW, 0,(int8_t *) string_buffer, TFT_STRING_MODE_BACKGROUND);
+				break;
+			case 1://Display Humidity
+				sprintf((char*)string_buffer,"  %02d%%  ",humidity);
+				tft_puts14x24(MONTH_LOCAL_ROW, 0, (int8_t *)string_buffer, TFT_STRING_MODE_BACKGROUND);
+				break;
+			case 2://Display Date/Month
+				sprintf((char*)string_buffer," %02d/%02d ",time_value[4],time_value[5]);
+				tft_puts14x24(MONTH_LOCAL_ROW, 0, (int8_t *)string_buffer, TFT_STRING_MODE_BACKGROUND);
+				break;
+			}
+
+			if(++slide_flag == 3)
+			{
+				slide_flag = 0;
+			}
+			osThreadResume(mainTaskHandle);
+			osSemaphoreRelease(semaControlTFTHandle);
+			osDelay(PERIOD_READ_TEMP_HUMI);
+		}
+	}
+  /* USER CODE END SlideTaskFunction */
+}
+
+/* USER CODE BEGIN Application */
+
+
+
+
+
+
+
+/* Read image from flash then display it on TFTLCD
+ * image_id from 0 to 53 ( 54 Images )
+ */
+void Display_Image(uint8_t image_id)
+{
+	uint8_t index;
+	uint16_t _index;
+	uint8_t * read_arr = (uint8_t*) malloc(1920);
+	uint16_t temp;
+	uint32_t start_add = image_id * 153600;
+
+	if(read_arr != NULL)
+	{
+		W25_FLASH_WAKEUP(&flash_64kbits); //Wake up flash
+
+		tft_address_set(0,0,tft_W-1,tft_H-1);
+
+		for(index = 0 ; index < 80 ; index++) //80*1920 = 153600
+		{
+			W25_FLASH_READ_DATA( &flash_64kbits, start_add + (index * 1920), read_arr, 1920);
+			for(_index = 0 ; _index < 1920 ; _index += 2)
+			{
+				temp = (read_arr[_index + 1]<<8) | read_arr[_index];
+				tft_write_data(temp);
+			}
+		}
+
+		W25_FLASH_PWR_DOWN(&flash_64kbits); // Turn off power of flash to reduce power consumtion
+		free(read_arr);
+	}
+}
+
+
+void Display_Template(void)
+{
+
+	Display_Image(13);
+
+
+
+	POINT_COLOR = DATE_MONTH_DISPLAY_COLOR;
+	tft_putchar14x24(SLASH_LOCAL_COLUMN,SLASH_LOCAL_ROW,'/',TFT_STRING_MODE_BACKGROUND);
+	POINT_COLOR = TIME_DISPLAY_COLOR;
+
+	tft_fill(HOUR_LOCAL_ROW-2,HOUR_LOCAL_COLUMN-2, HOUR_LOCAL_ROW-1,239, COLOR_BLACK);
+	tft_fill(HOUR_LOCAL_ROW-2,HOUR_LOCAL_COLUMN-2, 319,HOUR_LOCAL_COLUMN-1, COLOR_BLACK);
+}
+
+
+
+/* USER CODE END Application */
+
+/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
